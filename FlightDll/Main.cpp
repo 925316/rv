@@ -4,9 +4,7 @@
 #include <cstdarg>
 #include <cstring>
 
-#include "SDK/Engine_classes.hpp"
-#include "SDK/AVS_Vehicle_classes.hpp"
-#include "SDK/BP_VehicleBase_classes.hpp"
+#include "UE.hpp"
 #include "Signatures.hpp"
 
 // user32 is not in cl.exe's default libs.
@@ -170,7 +168,7 @@ namespace
     }
 
     // UE rotation matrix columns, written out to avoid linking GetActorForwardVector etc.
-    void BasisFromRotator(const SDK::FRotator& Rotation, SDK::FVector& Forward, SDK::FVector& Right, SDK::FVector& Up)
+    void BasisFromRotator(const UE::FRotator& Rotation, UE::FVector& Forward, UE::FVector& Right, UE::FVector& Up)
     {
         const double Pitch = Rotation.Pitch * kPi / 180.0;
         const double Yaw   = Rotation.Yaw   * kPi / 180.0;
@@ -185,13 +183,13 @@ namespace
 
     struct FlightState
     {
-        SDK::ABP_VehicleBase_C*  Vehicle = nullptr;
-        SDK::UPrimitiveComponent* Mesh   = nullptr;
+        UE::AVehicleBase*  Vehicle = nullptr;
+        UE::UPrimitiveComponent* Mesh   = nullptr;
         bool  bEngaged              = false;
         bool  bSavedGravity         = true;
         bool  bSavedBlockDownForce  = false;
-        SDK::FRotator TakeoffAttitude{};   // latched at Engage, held all flight
-        SDK::FVector KinVel{};             // our integrated velocity
+        UE::FRotator TakeoffAttitude{};   // latched at Engage, held all flight
+        UE::FVector KinVel{};             // our integrated velocity
         double SavedSpringDownforce   = 0.0; // AVS state saved at Engage,
         double SavedBaseLinearDrag    = 0.0; // restored on Disengage
         double SavedDefaultLinearDrag = 0.0;
@@ -203,36 +201,37 @@ namespace
     FlightState g_Flight;
 
     // g_World: level-transition detector, not a cache; the live world is re-fetched every tick.
-    SDK::UWorld* g_World       = nullptr;
+    UE::UWorld* g_World       = nullptr;
     HWND         g_GameWnd     = nullptr;
     WNDPROC      g_OrigWndProc = nullptr;
 
     constexpr UINT_PTR kTickTimerId  = 0x52494445; // arbitrary, non-zero
     constexpr UINT     kTickPeriodMs = 8;          // 8 ms cadence
 
-    SDK::APlayerController* LocalController(SDK::UWorld* World)
+    UE::APlayerController* LocalController(UE::UWorld* World)
     {
-        SDK::UGameInstance* GameInstance = World->OwningGameInstance;
-        if (!GameInstance || GameInstance->LocalPlayers.Num() == 0)
+        UE::UGameInstance* GameInstance = static_cast<UE::UGameInstance*>(World->OwningGameInstance);
+        if (!GameInstance || GameInstance->LocalPlayers.Num <= 0)
             return nullptr;
 
-        return GameInstance->LocalPlayers[0]->PlayerController;
+        UE::ULocalPlayer* Local = static_cast<UE::ULocalPlayer*>(GameInstance->LocalPlayers.At(0));
+        return static_cast<UE::APlayerController*>(Local->PlayerController);
     }
 
-    SDK::ABP_VehicleBase_C* LocalVehicle(SDK::APlayerController* Controller)
+    UE::AVehicleBase* LocalVehicle(UE::APlayerController* Controller)
     {
-        SDK::APawn* Pawn = Controller ? Controller->Pawn : nullptr;
+        UE::APawn* Pawn = Controller ? static_cast<UE::APawn*>(Controller->Pawn) : nullptr;
 
-        // Blueprint classes are matched with StaticName(), not StaticClass().
-        if (!Pawn || !Pawn->IsA(SDK::ABP_VehicleBase_C::StaticName()))
+        // Blueprint classes are matched by name through the class chain.
+        if (!Pawn || !UE::IsA(Pawn, L"BP_VehicleBase_C"))
             return nullptr;
 
-        return static_cast<SDK::ABP_VehicleBase_C*>(Pawn);
+        return static_cast<UE::AVehicleBase*>(Pawn);
     }
 
-    void Engage(SDK::ABP_VehicleBase_C* Vehicle, SDK::UPrimitiveComponent* Mesh)
+    void Engage(UE::AVehicleBase* Vehicle, UE::UPrimitiveComponent* Mesh)
     {
-        g_Flight.bSavedGravity        = Mesh->IsGravityEnabled();
+        g_Flight.bSavedGravity        = UE::IsGravityEnabled(Mesh);
         g_Flight.bSavedBlockDownForce = Vehicle->BlockDownwardForceInAir;
 
         // Park drag/damping at zero: they would ripple the step between overwrites.
@@ -240,20 +239,20 @@ namespace
         g_Flight.SavedBaseLinearDrag     = Vehicle->BaseLinearDrag;
         g_Flight.SavedDefaultLinearDrag  = Vehicle->DefaultLinearDrag;
         g_Flight.SavedDynamicAirDrag     = Vehicle->DynamicAirDrag;
-        g_Flight.SavedLinearDamping      = Mesh->GetLinearDamping();
+        g_Flight.SavedLinearDamping      = UE::GetLinearDamping(Mesh);
         Vehicle->SpringDownforce   = 0.0;
         Vehicle->BaseLinearDrag    = 0.0;
         Vehicle->DefaultLinearDrag = 0.0;
         Vehicle->DynamicAirDrag    = false;
-        Mesh->SetLinearDamping(0.0f);
+        UE::SetLinearDamping(Mesh, 0.0f);
 
         // Seed integrator with body velocity; latch the pose held for the whole flight.
-        const SDK::FVector Velocity0 = Mesh->GetPhysicsLinearVelocity(SDK::FName());
+        const UE::FVector Velocity0 = UE::GetPhysicsLinearVelocity(Mesh, {});
         g_Flight.KinVel = Velocity0;
-        g_Flight.TakeoffAttitude = Vehicle->K2_GetActorRotation();
+        g_Flight.TakeoffAttitude = UE::K2_GetActorRotation(Vehicle);
         g_Flight.LastStepMs = GetTickCount64();
 
-        Mesh->SetEnableGravity(false);
+        UE::SetEnableGravity(Mesh, false);
         Vehicle->BlockDownwardForceInAir = true;
 
         DebugLine("[RideFlight] engage (sim stays on, gravity was %d, blockDownForce was %d, pose=%.1f/%.1f/%.1f, vel=(%.0f %.0f %.0f))",
@@ -266,7 +265,7 @@ namespace
         g_Flight.bEngaged = true;
     }
 
-    void Disengage(SDK::ABP_VehicleBase_C* CurrentVehicle, SDK::UPrimitiveComponent* CurrentMesh)
+    void Disengage(UE::AVehicleBase* CurrentVehicle, UE::UPrimitiveComponent* CurrentMesh)
     {
         if (!g_Flight.bEngaged)
             return;
@@ -284,10 +283,10 @@ namespace
         if (g_Flight.Mesh)
         {
             // No velocity restore: body already carries our last KinVel.
-            g_Flight.Mesh->SetEnableGravity(g_Flight.bSavedGravity);
-            g_Flight.Mesh->SetLinearDamping(static_cast<float>(g_Flight.SavedLinearDamping));
-            g_Flight.Mesh->SetPhysicsAngularVelocityInRadians({ 0.0, 0.0, 0.0 }, false, SDK::FName());
-            g_Flight.Mesh->WakeRigidBody(SDK::FName());
+            UE::SetEnableGravity(g_Flight.Mesh, g_Flight.bSavedGravity);
+            UE::SetLinearDamping(g_Flight.Mesh, static_cast<float>(g_Flight.SavedLinearDamping));
+            UE::SetPhysicsAngularVelocityInRadians(g_Flight.Mesh, { 0.0, 0.0, 0.0 }, false, {});
+            UE::WakeRigidBody(g_Flight.Mesh, {});
         }
 
         if (g_Flight.Vehicle)
@@ -306,11 +305,11 @@ namespace
         g_Flight = FlightState{};
     }
 
-    void Step(SDK::ABP_VehicleBase_C* Vehicle, SDK::UPrimitiveComponent* Mesh, SDK::APlayerController* Controller)
+    void Step(UE::AVehicleBase* Vehicle, UE::UPrimitiveComponent* Mesh, UE::APlayerController* Controller)
     {
-        const SDK::FName Bone;                       // NAME_None, value-initialised by FName()
-        const SDK::FRotator Control = Controller->GetControlRotation();
-        const SDK::FRotator Actor   = Vehicle->K2_GetActorRotation();
+        const UE::FName Bone;                       // NAME_None, value-initialised by FName()
+        const UE::FRotator Control = UE::GetControlRotation(Controller);
+        const UE::FRotator Actor   = UE::K2_GetActorRotation(Vehicle);
 
         // Clamp dt: debugger pauses must not integrate a huge jump.
         const ULONGLONG NowMs = GetTickCount64();
@@ -322,13 +321,13 @@ namespace
             Dt = 0.008;
 
         // Re-zero every tick: the Blueprint re-asserts gravity, down-force and drag.
-        Mesh->SetEnableGravity(false);
+        UE::SetEnableGravity(Mesh, false);
         Vehicle->BlockDownwardForceInAir = true;
         Vehicle->SpringDownforce   = 0.0;
         Vehicle->BaseLinearDrag    = 0.0;
         Vehicle->DefaultLinearDrag = 0.0;
         Vehicle->DynamicAirDrag    = false;
-        Mesh->SetLinearDamping(0.0f);
+        UE::SetLinearDamping(Mesh, 0.0f);
 
         // Forward from camera yaw only; pitch ignored so looking down does not dive.
         const double CamYaw = Control.Yaw * kPi / 180.0;
@@ -393,8 +392,8 @@ namespace
 
         // Absolute overwrite of the body velocity; never the transform - that races
         // the game thread.
-        Mesh->WakeRigidBody(Bone);
-        Mesh->SetPhysicsLinearVelocity({ VelX, VelY, VelZ }, false, Bone);
+        UE::WakeRigidBody(Mesh, Bone);
+        UE::SetPhysicsLinearVelocity(Mesh, { VelX, VelY, VelZ }, false, Bone);
 
         // Error against the latched takeoff pose, not level or camera yaw.
         // UE positive pitch is a NEGATIVE right-hand rotation about Right (roll
@@ -403,12 +402,12 @@ namespace
         const double RollErr  = (g_Flight.TakeoffAttitude.Roll  - Actor.Roll)  * kPi / 180.0;
         const double YawErr   =  WrapAxis(g_Flight.TakeoffAttitude.Yaw - Actor.Yaw) * kPi / 180.0;
 
-        SDK::FVector Fwd, Right, Up;
+        UE::FVector Fwd, Right, Up;
         BasisFromRotator(Actor, Fwd, Right, Up);
 
-        const SDK::FVector AngVel = Mesh->GetPhysicsAngularVelocityInRadians(Bone);
+        const UE::FVector AngVel = UE::GetPhysicsAngularVelocityInRadians(Mesh, Bone);
 
-        SDK::FVector Torque;
+        UE::FVector Torque;
         Torque.X = -Right.X * (PitchErr * kLevelGain) - Fwd.X * (RollErr * kLevelGain) - AngVel.X * kDamp;
         Torque.Y = -Right.Y * (PitchErr * kLevelGain) - Fwd.Y * (RollErr * kLevelGain) - AngVel.Y * kDamp;
         Torque.Z = -Right.Z * (PitchErr * kLevelGain) - Fwd.Z * (RollErr * kLevelGain) - AngVel.Z * kDamp
@@ -423,7 +422,7 @@ namespace
             Torque.Z *= Scale;
         }
 
-        Mesh->AddTorqueInRadians(Torque, Bone, true);
+        UE::AddTorqueInRadians(Mesh, Torque, Bone, true);
     }
 
     // Game-thread pump at >= 8 ms spacing; all UObject access stays in this path.
@@ -436,7 +435,7 @@ namespace
         LastTick = Now;
 
         // Re-fetch every tick; the level swap can leave it null or half-initialized.
-        SDK::UWorld* World = SDK::UWorld::GetWorld();
+        UE::UWorld* World = UE::GetWorld();
         if (!World || !World->PersistentLevel || !World->OwningGameInstance)
             return;
 
@@ -447,9 +446,9 @@ namespace
             DebugLine("[RideFlight] world changed -> %p, re-acquired", (void*)World);
         }
 
-        SDK::APlayerController*   Controller = LocalController(World);
-        SDK::ABP_VehicleBase_C*   Vehicle    = LocalVehicle(Controller);
-        SDK::UPrimitiveComponent* Mesh       = Vehicle ? Vehicle->VehicleMesh : nullptr;
+        UE::APlayerController*   Controller = LocalController(World);
+        UE::AVehicleBase*   Vehicle    = LocalVehicle(Controller);
+        UE::UPrimitiveComponent* Mesh       = Vehicle ? static_cast<UE::UPrimitiveComponent*>(Vehicle->VehicleMesh) : nullptr;
 
         if (!KeyDown(VK_SHIFT) || !Vehicle || !Mesh || !Controller)
         {
