@@ -1,0 +1,30 @@
+# Generates a C header holding the DLL bytes: DLL_BYTES[] / DLL_SIZE.
+# Usage: cmake -DSRC=<dll> -DOUT=<header.h> -P embed_dll.cmake
+if(NOT DEFINED SRC OR NOT DEFINED OUT)
+    message(FATAL_ERROR "usage: cmake -DSRC=<dll> -DOUT=<header.h> -P embed_dll.cmake")
+endif()
+if(NOT EXISTS "${SRC}")
+    message(FATAL_ERROR "input not found: ${SRC}")
+endif()
+
+file(READ "${SRC}" hex HEX)
+string(TOUPPER "${hex}" hex)
+string(LENGTH "${hex}" hex_len)
+math(EXPR byte_count "${hex_len} / 2")
+
+set(text "static const unsigned char DLL_BYTES[] = {")
+set(offset 0)
+while(offset LESS hex_len)
+    math(EXPR remaining "${hex_len} - ${offset}")
+    if(remaining GREATER 32)
+        string(SUBSTRING "${hex}" ${offset} 32 chunk)
+    else()
+        string(SUBSTRING "${hex}" ${offset} -1 chunk)
+    endif()
+    string(REGEX REPLACE "(..)" "0x\\1," line "${chunk}")
+    string(APPEND text "\n${line}")
+    math(EXPR offset "${offset} + 32")
+endwhile()
+string(APPEND text "\n};\nstatic const unsigned int DLL_SIZE = ${byte_count};\n")
+
+file(WRITE "${OUT}" "${text}")

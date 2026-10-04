@@ -1,4 +1,4 @@
-# Build artifacts (FlightDll\build, Launcher\build)
+# Out-of-source build directory and stray compiler artifacts
 build/
 *.obj
 *.pdb
