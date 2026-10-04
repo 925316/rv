@@ -1,0 +1,20 @@
+# Build artifacts (FlightDll\build, Launcher\build)
+build/
+*.obj
+*.pdb
+*.dll
+*.exe
+*.lib
+*.ilk
+*.exp
+*.pch
+
+# Crash black-box log written next to the injected DLL
+*.crash.log
+
+# Tooling / local state
+.omo/
+.vs/
+.vscode/
+Thumbs.db
+Desktop.ini

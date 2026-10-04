@@ -1,0 +1,10 @@
+# Default: let git normalize line endings on commit, OS-native on checkout.
+* text=auto
+
+# Batch files must stay CRLF - cmd misparses LF-only multi-line blocks.
+*.bat text eol=crlf
+
+# Binaries are declared by extension in .gitignore; keep dumps opaque.
+*.txt -text
+*.usmap -text
+*.idmap -text
