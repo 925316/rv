@@ -1,0 +1,57 @@
+# Continuous deployment: every push to master rebuilds the Release launcher and
+# overwrites the rolling "latest" GitHub release, so the Releases page always
+# hosts the newest build under a permanent download link.
+
+name: release
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          # /MT static runtime; output.dll is embedded at build time,
+          # so the bare exe is the whole distribution.
+          Copy-Item build/Release/launcher.exe dist/rv-launcher-win64.exe
+          $hash = (Get-FileHash dist/rv-launcher-win64.exe -Algorithm SHA256).Hash.ToLower()
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Publish to the rolling latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $asset = "dist/rv-launcher-win64.exe"
+          $commit = "${{ github.sha }}".Substring(0, 7)
+          $notes = "Built from commit $commit`nSHA256: ${{ steps.package.outputs.sha256 }}"
+          gh release upload latest $asset --clobber
+          if ($LASTEXITCODE -ne 0) {
+            gh release create latest $asset --title "RV latest" --target ${{ github.sha }} --notes $notes
+          } else {
+            gh release edit latest --target ${{ github.sha }} --notes $notes
+          }
+          # Force-update the tag so it always points at the latest commit
+          git tag -f latest ${{ github.sha }}
+          git push -f origin latest

@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 
+# Default the VS generator to clang-cl (LLVM toolset). An explicit -T on the
+# command line wins because its value is already set when this file is read.
+if(CMAKE_GENERATOR MATCHES "Visual Studio" AND NOT CMAKE_GENERATOR_TOOLSET)
+    set(CMAKE_GENERATOR_TOOLSET "ClangCL")
+endif()
+
 project(rv LANGUAGES CXX)
 
 # Both targets are 64-bit only (Ride-Win64 + x64 launcher).

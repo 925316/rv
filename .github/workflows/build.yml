@@ -1,0 +1,24 @@
+name: build
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload launcher.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher
+          path: build/Release/launcher.exe
+          if-no-files-found: error

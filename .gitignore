@@ -1,5 +1,6 @@
 # Out-of-source build directory and stray compiler artifacts
 build/
+sln/
 *.obj
 *.pdb
 *.dll
