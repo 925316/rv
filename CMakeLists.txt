@@ -16,16 +16,33 @@ if(NOT MSVC)
     message(FATAL_ERROR "MSVC toolchain required: use the VS generator or an x64 developer prompt.")
 endif()
 
-# /std:c++latest /W3 /utf-8 (/O2, /EHsc, /INCREMENTAL:NO come with Release).
-add_compile_options(/std:c++latest /W3 /utf-8)
+# /utf-8 everywhere (/O2, /EHsc, /INCREMENTAL:NO come with Release).
+add_compile_options(/utf-8)
+
+# Pinned instead of /std:c++latest: the toolset default moves underneath us and
+# a silent standard bump is not something a hand-kept offset table needs.
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Injected DLL. Output name is deliberately plain: output.dll.
 add_library(rv SHARED
     src/rv/main.cpp
+    src/rv/crash.hpp
+    src/rv/diagnostics.hpp
+    src/rv/flight.hpp
+    src/rv/hook.hpp
+    src/rv/input.hpp
+    src/rv/log.hpp
+    src/rv/math.hpp
+    src/rv/offsets.hpp
     src/rv/resolve.hpp
     src/rv/signatures.hpp
+    src/rv/state.hpp
     src/rv/unreal.hpp)
-target_compile_options(rv PRIVATE /wd4369 /wd4309)
+# 4369/4309: int64 <-> double conversions in the mirrored UE layout.
+# 4820: the UE structs are padded to absolute offsets on purpose.
+target_compile_options(rv PRIVATE /W4 /wd4369 /wd4309 /wd4820)
 set_target_properties(rv PROPERTIES
     OUTPUT_NAME "output"
     MSVC_RUNTIME_LIBRARY "MultiThreaded")
@@ -45,9 +62,13 @@ add_custom_command(
 # Injector exe. No OUTPUT_NAME: it lands as launcher.exe (target name).
 add_executable(launcher
     src/launcher/main.cpp
+    src/launcher/config.hpp
+    src/launcher/inject.hpp
+    src/launcher/process.hpp
     "${generated_dir}/dllbytes.h")
 target_compile_definitions(launcher PRIVATE UNICODE _UNICODE)
-target_include_directories(launcher PRIVATE "${generated_dir}")
+target_compile_options(launcher PRIVATE /W4)
+target_include_directories(launcher PRIVATE "${generated_dir}" "${CMAKE_CURRENT_SOURCE_DIR}/src/rv")
 target_link_libraries(launcher PRIVATE user32 advapi32)
 set_target_properties(launcher PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded")

@@ -18,9 +18,9 @@ namespace signatures
 	struct pattern
 	{
 		uint8_t m_bytes[256] = {};
-		bool    m_mask[256]  = {};   // true = byte must match, false = wildcard
-		size_t  m_size       = 0;
-		bool    m_valid      = false;
+		bool    m_mask[256] = {};   // true = byte must match, false = wildcard
+		size_t  m_size = 0;
+		bool    m_valid = false;
 	};
 
 	struct known_signature
@@ -28,7 +28,7 @@ namespace signatures
 		const char* m_name;
 		const char* m_text;
 		uint32_t    m_rva;           // expected offset on the source build;
-		                              // mismatch = game updated, table wants a refresh
+		// mismatch = game updated, table wants a refresh
 	};
 
 	// Verified unique on the target build (5.6.0-20702 rel-1.3).
@@ -67,7 +67,7 @@ namespace signatures
 	// digits or a question mark.
 	inline bool parse(const char* text, pattern& out)
 	{
-		out.m_size  = 0;
+		out.m_size = 0;
 		out.m_valid = false;
 		if (!text)
 			return false;
@@ -89,11 +89,11 @@ namespace signatures
 				return false;
 
 			const bool wildcard = (token_len == 1 && token_start[0] == '?') ||
-			                      (token_len == 2 && token_start[0] == '?' && token_start[1] == '?');
+				(token_len == 2 && token_start[0] == '?' && token_start[1] == '?');
 			if (wildcard)
 			{
 				out.m_bytes[out.m_size] = 0;
-				out.m_mask[out.m_size]  = false;
+				out.m_mask[out.m_size] = false;
 				++out.m_size;
 				continue;
 			}
@@ -114,7 +114,7 @@ namespace signatures
 				return false;
 
 			out.m_bytes[out.m_size] = (uint8_t)((hi << 4) | lo);
-			out.m_mask[out.m_size]  = true;
+			out.m_mask[out.m_size] = true;
 			++out.m_size;
 		}
 
@@ -135,14 +135,14 @@ namespace signatures
 		if (anchor == pat.m_size)
 			return nullptr;
 
-		const uint8_t  want      = pat.m_bytes[anchor];
+		const uint8_t  want = pat.m_bytes[anchor];
 		const size_t   max_start = size - pat.m_size;   // inclusive
-		size_t         start     = 0;
+		size_t         start = 0;
 
 		while (start <= max_start)
 		{
 			const size_t hay_start = start + anchor;
-			const size_t hay_end   = max_start + anchor;   // inclusive
+			const size_t hay_end = max_start + anchor;   // inclusive
 			if (hay_start > hay_end)
 				return nullptr;
 
@@ -189,19 +189,18 @@ namespace signatures
 		return nt->OptionalHeader.SizeOfImage;
 	}
 
-	// Runs fn(va, len, characteristics) once per section of the main module
-	// image with len clamped to SizeOfImage; stops early when fn returns
-	// false. Returns false on bad PE headers or an early stop.
+	// fn(va, len, chars) per section, len clamped to SizeOfImage; fn may return
+	// false to stop early.
 	template <typename Fn>
 	inline bool for_each_section(Fn&& fn)
 	{
-		const uint8_t* base     = module_base();
+		const uint8_t* base = module_base();
 		const size_t   img_size = module_size(base);
 		if (!base || !img_size)
 			return false;
 
-		const IMAGE_DOS_HEADER*    dos = (const IMAGE_DOS_HEADER*)base;
-		const IMAGE_NT_HEADERS*    nt  = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+		const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
+		const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
 		const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
 		for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
 		{
@@ -217,10 +216,8 @@ namespace signatures
 		return true;
 	}
 
-	// First match of pat among the executable sections of the main module
-	// (the game EXE). out_hits null keeps the original early-out behavior;
-	// non-null makes the scan continue past the first hit so the caller can
-	// verify the match is unique.
+	// First match in executable sections. out_hits=null keeps early-out;
+	// non-null continues the scan to count all matches (uniqueness check).
 	inline const uint8_t* find_in_image(const pattern& pat, int* out_hits = nullptr)
 	{
 		if (out_hits)
@@ -231,15 +228,14 @@ namespace signatures
 			return nullptr;
 
 		const uint8_t* first = nullptr;
-		int            hits  = 0;
+		int            hits = 0;
 		for_each_section([&](uint32_t va, size_t len, uint32_t chars) -> bool
 		{
 			if (!(chars & IMAGE_SCN_MEM_EXECUTE))
 				return true;
 
-			// Count every match in this section, not just the first: two hits
-			// inside the same section must also read as ambiguous.
-			const uint8_t* cur  = base + va;
+			// Count all matches per section: same-section repeat hits are ambiguous.
+			const uint8_t* cur = base + va;
 			size_t         left = len;
 			while (left >= pat.m_size)
 			{
@@ -272,18 +268,55 @@ namespace signatures
 
 	inline constexpr const char* APPEND_STRING_PATTERN = "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 80 3D ?? ?? ?? ?? 00 48 8B F2 8B 19 48 8B F9 74 09 4C 8D 05 ?? ?? ?? ??";
 
-	// Visits RIP-relative memory operands whose target lands in a writable
-	// section: the 2-byte encoding form `opcode modrm disp32` with modrm
-	// mod=00 r/m=101 (optionally behind a REX byte). Operands pointing at
-	// read-only data (.rdata constants, vtables, imports) never reach visit
-	// - no mutable global lives there - but they are still counted in the
-	// returned total. target is the image-relative offset the disp32
-	// resolves to, opcode the byte at the operand start.
+	// Length of the legacy prefix run starting at p. A REX byte is NOT part of
+	// this: in 64-bit mode it is the last prefix before the opcode, while
+	// these may stack in any order before it.
+	inline size_t legacy_prefix_len(const uint8_t* p, size_t avail)
+	{
+		size_t i = 0;
+		while (i < avail)
+		{
+			const uint8_t b = p[i];
+			const bool legacy = b == 0xF0 || b == 0xF2 || b == 0xF3   // lock, repne, rep
+				|| b == 0x2E || b == 0x36 || b == 0x3E              // cs, ss, ds
+				|| b == 0x26 || b == 0x64 || b == 0x65              // es, fs, gs
+				|| b == 0x66 || b == 0x67;                          // operand, address size
+			if (!legacy)
+				break;
+			++i;
+		}
+		return i;
+	}
+
+	// Two-byte opcodes that carry a RIP-relative memory operand. Anything else
+	// behind 0x0F is skipped rather than guessed: reading the escape's second
+	// byte as a modrm both invents references (0F 05 is syscall, whose 0x05
+	// looks exactly like [rip+disp32]) and misses the real ones.
+	inline bool rip_relative_two_byte_opcode(uint8_t opc2)
+	{
+		switch (opc2)
+		{
+		case 0x10:   // movups xmm, [rip+disp32]
+		case 0x11:   // movups [rip+disp32], xmm
+		case 0x28:   // movaps xmm, [rip+disp32]
+		case 0x29:   // movaps [rip+disp32], xmm
+		case 0x6F:   // movdqa xmm, [rip+disp32]
+		case 0x7F:   // movdqa [rip+disp32], xmm
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	// Visits RIP-relative memory operands (`opcode modrm disp32`, modrm mod=00
+	// r/m=101, optional legacy prefixes, optional REX). Only targets in
+	// writable sections reach visit; read-only refs still count in the return
+	// total. target = image RVA of the displacement target.
 	using rip_ref_visitor = void (*)(void* ctx, uint32_t target_rva, uint8_t opcode);
 
 	inline uint64_t enumerate_rip_refs(rip_ref_visitor visit, void* ctx)
 	{
-		const uint8_t* base     = module_base();
+		const uint8_t* base = module_base();
 		const size_t   img_size = module_size(base);
 		if (!base || !img_size || !visit)
 			return 0;
@@ -318,25 +351,66 @@ namespace signatures
 			if (!(chars & IMAGE_SCN_MEM_EXECUTE))
 				return true;
 
-			for (size_t off = 0; off < len; ++off)
+			const uint8_t* sec = base + va;
+			size_t         off = 0;
+			while (off < len)
 			{
-				size_t op = off;
-				if ((base[va + off] & 0xF0) == 0x40)
+				const size_t   avail = len - off;
+				const uint8_t* cur = sec + off;
+
+				const size_t prefix = legacy_prefix_len(cur, avail);
+				if (prefix >= avail)
+					break;
+
+				size_t op = prefix;
+				if ((cur[op] & 0xF0) == 0x40)   // REX
 					++op;
-				if (va + op + 6 > va + len)
-					continue;
-				if ((base[va + op + 1] & 0xC7) != 0x05)
-					continue;
+				if (op >= avail)
+					break;
 
-				int32_t disp;
-				memcpy(&disp, base + va + op + 2, 4);
-				int64_t target = (int64_t)va + (int64_t)op + 6 + disp;
-				if (target < 0 || (uint64_t)target >= (uint64_t)img_size)
-					continue;
+				int32_t disp = 0;
+				size_t instr_len = 0;
+				if (cur[op] == 0x0F)
+				{
+					// modrm sits at op+2; the whole form is 7 bytes from cur.
+					if (op + 7 > avail)
+						break;
+					if (!rip_relative_two_byte_opcode(cur[op + 1]) ||
+						(cur[op + 2] & 0xC7) != 0x05)
+					{
+						++off;
+						continue;
+					}
+					memcpy(&disp, cur + op + 3, 4);
+					instr_len = op + 7;
+				}
+				else
+				{
+					// opcode + modrm + disp32, so 6 bytes from cur.
+					if (op + 6 > avail)
+						break;
+					if ((cur[op + 1] & 0xC7) != 0x05)
+					{
+						++off;
+						continue;
+					}
+					memcpy(&disp, cur + op + 2, 4);
+					instr_len = op + 6;
+				}
 
-				++hits;
-				if (is_writable((uint32_t)target))
-					visit(ctx, (uint32_t)target, base[va + op]);
+				const int64_t target = (int64_t)(va + off + instr_len) + disp;
+				if (target >= 0 && (uint64_t)target < (uint64_t)img_size)
+				{
+					++hits;
+					if (is_writable((uint32_t)target))
+						visit(ctx, (uint32_t)target, cur[op]);
+				}
+
+				// Resume after the instruction so one reference is counted
+				// once, not again from each of its prefix bytes. A form with
+				// a trailing immediate is under-measured here; that only
+				// costs one redundant re-scan.
+				off += instr_len;
 			}
 			return true;
 		});
