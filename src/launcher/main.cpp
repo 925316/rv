@@ -219,7 +219,7 @@ int wmain()
 {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	// %hs = narrow string in a wide format (MSVC extension).
-	wprintf(L"RideFlight launcher (built %hs %hs, dll %u bytes)\n",
+	wprintf(L"RV launcher (built %hs %hs, dll %u bytes)\n",
 	        __DATE__, __TIME__, static_cast<unsigned>(DLL_SIZE));
 
 	DWORD pid = find_process_id(PROCESS_NAME);

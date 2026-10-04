@@ -253,7 +253,7 @@ namespace
 		unreal::set_enable_gravity(mesh, false);
 		vehicle->BlockDownwardForceInAir = true;
 
-		debug_line("[RideFlight] engage (sim stays on, gravity was %d, blockDownForce was %d, pose=%.1f/%.1f/%.1f, vel=(%.0f %.0f %.0f))",
+		debug_line("engage (sim stays on, gravity was %d, blockDownForce was %d, pose=%.1f/%.1f/%.1f, vel=(%.0f %.0f %.0f))",
 			g_state.m_saved_gravity ? 1 : 0, g_state.m_saved_block_down_force ? 1 : 0,
 			g_state.m_takeoff_attitude.Pitch, g_state.m_takeoff_attitude.Yaw, g_state.m_takeoff_attitude.Roll,
 			g_state.m_kin_vel.X, g_state.m_kin_vel.Y, g_state.m_kin_vel.Z);
@@ -272,7 +272,7 @@ namespace
 		const bool stale = (g_state.m_vehicle != current_vehicle) || (g_state.m_mesh != current_mesh);
 		if (stale)
 		{
-			debug_line("[RideFlight] disengage: saved pointers stale (vehicle %p -> %p), skipping restore",
+			debug_line("disengage: saved pointers stale (vehicle %p -> %p), skipping restore",
 				(void*)g_state.m_vehicle, (void*)current_vehicle);
 			g_state = state{};
 			return;
@@ -296,7 +296,7 @@ namespace
 			g_state.m_vehicle->DynamicAirDrag    = g_state.m_saved_dynamic_air_drag;
 		}
 
-		debug_line("[RideFlight] disengage (body already at vel=(%.0f %.0f %.0f), restored gravity=%d, blockDownForce=%d)",
+		debug_line("disengage (body already at vel=(%.0f %.0f %.0f), restored gravity=%d, blockDownForce=%d)",
 			g_state.m_kin_vel.X, g_state.m_kin_vel.Y, g_state.m_kin_vel.Z,
 			g_state.m_saved_gravity ? 1 : 0, g_state.m_saved_block_down_force ? 1 : 0);
 
@@ -441,7 +441,7 @@ namespace
 		{
 			disengage(nullptr, nullptr);   // old-world pointers, stale now
 			g_world = world;
-			debug_line("[RideFlight] world changed -> %p, re-acquired", (void*)world);
+			debug_line("world changed -> %p, re-acquired", (void*)world);
 		}
 
 		unreal::APlayerController*   controller = get_controller(world);
@@ -532,7 +532,7 @@ namespace
 			SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(hook_wnd_proc)));
 		if (!prev)
 		{
-			debug_line("[RideFlight] subclass of %p failed (%lu)", (void*)hwnd, GetLastError());
+			debug_line("subclass of %p failed (%lu)", (void*)hwnd, GetLastError());
 			return false;
 		}
 
@@ -541,7 +541,7 @@ namespace
 		g_game_wnd = hwnd;
 		SetTimer(hwnd, TICK_TIMER_ID, TICK_PERIOD_MS, nullptr);
 
-		debug_line("[RideFlight] game-thread tick installed (hwnd=%p, timer=%u ms)", (void*)hwnd, TICK_PERIOD_MS);
+		debug_line("game-thread tick installed (hwnd=%p, timer=%u ms)", (void*)hwnd, TICK_PERIOD_MS);
 		return true;
 	}
 }
@@ -555,10 +555,10 @@ DWORD main_thread(HMODULE module)
 	FILE* console_out = nullptr;
 	if (AllocConsole())
 		freopen_s(&console_out, "CONOUT$", "w", stdout);
-	SetConsoleTitleA("RideFlight debug");
+	SetConsoleTitleA("RV debug");
 	g_has_console = (console_out != nullptr);
 
-	debug_line("[RideFlight] waiting for game window ... (build " __DATE__ " " __TIME__ ")");
+	debug_line("waiting for game window ... (build " __DATE__ " " __TIME__ ")");
 
 	resolve_globals(debug_line);
 	verify_signatures();
@@ -576,12 +576,12 @@ DWORD main_thread(HMODULE module)
 			if (!retried_logged)
 			{
 				retried_logged = true;
-				debug_line("[RideFlight] no game window yet, retrying quietly ...");
+				debug_line("no game window yet, retrying quietly ...");
 			}
 		}
 		else if (!g_game_wnd || !IsWindow(g_game_wnd))
 		{
-			debug_line("[RideFlight] game window lost, re-installing hook ...");
+			debug_line("game window lost, re-installing hook ...");
 			g_game_wnd = nullptr;
 			g_orig_wnd_proc = nullptr;
 			installed = false;

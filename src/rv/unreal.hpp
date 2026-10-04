@@ -9,7 +9,7 @@
  * Hand-maintained UE layer; the Dumper-7 dump is no longer a compile
  * dependency (only its constants were harvested once). Layouts below were
  * verified against live memory.
- * Offsets: Ride-Win64-Shipping.exe 5.6.0-20702 rel-1.3; signatures.hpp
+ * Offsets: target game build 5.6.0-20702 rel-1.3; signatures.hpp
  * reports when the build changes.
  */
 
@@ -24,6 +24,10 @@ namespace unreal
 	inline constexpr uintptr_t APPEND_STRING_RVA = 0x01256FE0;
 	inline constexpr int       PROCESS_EVENT_IDX = 0x4C;
 
+	// Runtime-resolved counterparts of the constants above. Written exactly
+	// once by rv::resolve_globals() on the loader thread BEFORE the
+	// game-thread hook is installed, then read-only from the hook. Never
+	// mutate them once hooks are live - that would race the game thread.
 	inline uintptr_t g_objects_rva       = G_OBJECTS_RVA;
 	inline uintptr_t g_world_rva         = G_WORLD_RVA;
 	inline uintptr_t g_append_string_rva = APPEND_STRING_RVA;

@@ -154,16 +154,23 @@ namespace detail
 			return;
 		}
 
-		// 1) AppendString: unique full-prologue hit in executable code.
+		// 1) AppendString: adopted only when the full-prologue pattern hits
+		// exactly once; ambiguous or missing patterns keep the fallback.
 		{
 			signatures::pattern ap;
-			const uint8_t* hit = nullptr;
+			const uint8_t*      hit  = nullptr;
+			int                 hits = 0;
 			if (signatures::parse(signatures::APPEND_STRING_PATTERN, ap))
-				hit = signatures::find_in_image(ap);
-			if (hit)
+				hit = signatures::find_in_image(ap, &hits);
+			if (hit && hits == 1)
 			{
 				unreal::g_append_string_rva = (uintptr_t)(hit - img);
 				log("[sig] AppendString -> rva 0x%X\n", (uint32_t)unreal::g_append_string_rva);
+			}
+			else if (hits > 1)
+			{
+				log("[sig] AppendString: %d hits (ambiguous) - keeping fallback 0x%X\n",
+				    hits, (uint32_t)unreal::APPEND_STRING_RVA);
 			}
 			else
 			{
@@ -172,10 +179,11 @@ namespace detail
 			}
 		}
 
-		// 2) Census of all RIP-relative memory operands.
+		// 2) Census of RIP-relative references into writable data.
 		std::unordered_map<uint32_t, detail::ref_stat> census;
+		census.reserve(1 << 16);
 		const uint64_t hits = signatures::enumerate_rip_refs(detail::rip_ref_accumulate, &census);
-		log("[sig] rip-ref census: %llu hits, %zu targets\n",
+		log("[sig] rip-ref census: %llu hits, %zu writable targets\n",
 		    (unsigned long long)hits, census.size());
 
 		// 3) GObjects: TUObjectArray layout + chunk deref, rank by refs.

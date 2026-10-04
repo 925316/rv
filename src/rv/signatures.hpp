@@ -31,7 +31,7 @@ namespace signatures
 		                              // mismatch = game updated, table wants a refresh
 	};
 
-	// Verified unique against Ride-Win64-Shipping.exe 5.6.0-20702 rel-1.3.
+	// Verified unique on the target build (5.6.0-20702 rel-1.3).
 	inline constexpr known_signature TABLE[] =
 	{
 		{ "ProcessEvent",
@@ -169,45 +169,6 @@ namespace signatures
 		return nullptr;
 	}
 
-	// Scan every executable section of the main module (the game EXE).
-	inline const uint8_t* find_in_image(const pattern& pat)
-	{
-		const uint8_t* base = (const uint8_t*)GetModuleHandleW(nullptr);
-		if (!base)
-			return nullptr;
-
-		const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
-		if (dos->e_magic != IMAGE_DOS_SIGNATURE)
-			return nullptr;
-
-		const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
-		if (nt->Signature != IMAGE_NT_SIGNATURE)
-			return nullptr;
-
-		const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
-		for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
-		{
-			if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE))
-				continue;
-
-			const uint8_t* begin = base + sec[i].VirtualAddress;
-			const size_t   len   = sec[i].Misc.VirtualSize;
-			if (const uint8_t* hit = find_pattern(begin, len, pat))
-				return hit;
-		}
-		return nullptr;
-	}
-
-	inline const void* find_in_image(const char* text)
-	{
-		pattern p;
-		if (!parse(text, p))
-			return nullptr;
-		return find_in_image(p);
-	}
-
-	inline constexpr const char* APPEND_STRING_PATTERN = "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 80 3D ?? ?? ?? ?? 00 48 8B F2 8B 19 48 8B F9 74 09 4C 8D 05 ?? ?? ?? ??";
-
 	// Mapped base of the main module image.
 	inline const uint8_t* module_base()
 	{
@@ -228,37 +189,134 @@ namespace signatures
 		return nt->OptionalHeader.SizeOfImage;
 	}
 
-	// Visits every RIP-relative memory operand in the executable sections:
-	// the 2-byte encoding form `opcode modrm disp32` with modrm mod=00 r/m=101
-	// (optionally behind a REX-byte). target is the image-relative offset the
-	// disp32 resolves to, opcode the byte at the operand start.
+	// Runs fn(va, len, characteristics) once per section of the main module
+	// image with len clamped to SizeOfImage; stops early when fn returns
+	// false. Returns false on bad PE headers or an early stop.
+	template <typename Fn>
+	inline bool for_each_section(Fn&& fn)
+	{
+		const uint8_t* base     = module_base();
+		const size_t   img_size = module_size(base);
+		if (!base || !img_size)
+			return false;
+
+		const IMAGE_DOS_HEADER*    dos = (const IMAGE_DOS_HEADER*)base;
+		const IMAGE_NT_HEADERS*    nt  = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+		const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+		for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+		{
+			const uint32_t va = sec[i].VirtualAddress;
+			if ((size_t)va >= img_size)
+				continue;
+			size_t len = sec[i].Misc.VirtualSize;
+			if ((size_t)va + len > img_size)
+				len = img_size - va;
+			if (!fn(va, len, sec[i].Characteristics))
+				return false;
+		}
+		return true;
+	}
+
+	// First match of pat among the executable sections of the main module
+	// (the game EXE). out_hits null keeps the original early-out behavior;
+	// non-null makes the scan continue past the first hit so the caller can
+	// verify the match is unique.
+	inline const uint8_t* find_in_image(const pattern& pat, int* out_hits = nullptr)
+	{
+		if (out_hits)
+			*out_hits = 0;
+
+		const uint8_t* base = module_base();
+		if (!base)
+			return nullptr;
+
+		const uint8_t* first = nullptr;
+		int            hits  = 0;
+		for_each_section([&](uint32_t va, size_t len, uint32_t chars) -> bool
+		{
+			if (!(chars & IMAGE_SCN_MEM_EXECUTE))
+				return true;
+
+			// Count every match in this section, not just the first: two hits
+			// inside the same section must also read as ambiguous.
+			const uint8_t* cur  = base + va;
+			size_t         left = len;
+			while (left >= pat.m_size)
+			{
+				const uint8_t* hit = find_pattern(cur, left, pat);
+				if (!hit)
+					break;
+				if (!first)
+					first = hit;
+				++hits;
+				if (!out_hits)
+					return false;   // caller did not ask to count: first hit wins
+				const size_t step = (size_t)(hit - cur) + 1;
+				cur += step;
+				left -= step;
+			}
+			return true;
+		});
+		if (out_hits)
+			*out_hits = hits;
+		return first;
+	}
+
+	inline const void* find_in_image(const char* text)
+	{
+		pattern p;
+		if (!parse(text, p))
+			return nullptr;
+		return find_in_image(p);
+	}
+
+	inline constexpr const char* APPEND_STRING_PATTERN = "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 80 3D ?? ?? ?? ?? 00 48 8B F2 8B 19 48 8B F9 74 09 4C 8D 05 ?? ?? ?? ??";
+
+	// Visits RIP-relative memory operands whose target lands in a writable
+	// section: the 2-byte encoding form `opcode modrm disp32` with modrm
+	// mod=00 r/m=101 (optionally behind a REX byte). Operands pointing at
+	// read-only data (.rdata constants, vtables, imports) never reach visit
+	// - no mutable global lives there - but they are still counted in the
+	// returned total. target is the image-relative offset the disp32
+	// resolves to, opcode the byte at the operand start.
 	using rip_ref_visitor = void (*)(void* ctx, uint32_t target_rva, uint8_t opcode);
 
 	inline uint64_t enumerate_rip_refs(rip_ref_visitor visit, void* ctx)
 	{
-		const uint8_t* base = module_base();
-		if (!base || !visit)
+		const uint8_t* base     = module_base();
+		const size_t   img_size = module_size(base);
+		if (!base || !img_size || !visit)
 			return 0;
 
-		const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
-		if (dos->e_magic != IMAGE_DOS_SIGNATURE)
-			return 0;
-		const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
-		if (nt->Signature != IMAGE_NT_SIGNATURE)
-			return 0;
-		const size_t img_size = nt->OptionalHeader.SizeOfImage;
+		// Writable spans: a mutable global slot can only live in a section
+		// the process writes to at runtime.
+		struct region
+		{
+			uint32_t m_beg;
+			uint32_t m_end;
+		};
+		region   writable[64];
+		unsigned writable_n = 0;
+		for_each_section([&](uint32_t va, size_t len, uint32_t chars) -> bool
+		{
+			if ((chars & IMAGE_SCN_MEM_WRITE) && writable_n < 64)
+				writable[writable_n++] = { va, va + (uint32_t)len };
+			return true;
+		});
+
+		const auto is_writable = [&](uint32_t t) -> bool
+		{
+			for (unsigned i = 0; i < writable_n; ++i)
+				if (t >= writable[i].m_beg && t < writable[i].m_end)
+					return true;
+			return false;
+		};
 
 		uint64_t hits = 0;
-		const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
-		for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+		for_each_section([&](uint32_t va, size_t len, uint32_t chars) -> bool
 		{
-			if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE))
-				continue;
-
-			const uint32_t va  = sec[i].VirtualAddress;
-			size_t         len = sec[i].Misc.VirtualSize;
-			if ((size_t)va + len > img_size)
-				len = img_size - va;
+			if (!(chars & IMAGE_SCN_MEM_EXECUTE))
+				return true;
 
 			for (size_t off = 0; off < len; ++off)
 			{
@@ -276,10 +334,12 @@ namespace signatures
 				if (target < 0 || (uint64_t)target >= (uint64_t)img_size)
 					continue;
 
-				visit(ctx, (uint32_t)target, base[va + op]);
 				++hits;
+				if (is_writable((uint32_t)target))
+					visit(ctx, (uint32_t)target, base[va + op]);
 			}
-		}
+			return true;
+		});
 		return hits;
 	}
 }

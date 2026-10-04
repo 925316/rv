@@ -8,7 +8,7 @@ endif()
 
 project(rv LANGUAGES CXX)
 
-# Both targets are 64-bit only (Ride-Win64 + x64 launcher).
+# Both targets are 64-bit only (x64 process + x64 launcher).
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "x64 build required: configure with -A x64 (VS generator).")
 endif()
