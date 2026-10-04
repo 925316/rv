@@ -22,8 +22,9 @@ add_compile_options(/std:c++latest /W3 /utf-8)
 # Injected DLL. Output name is deliberately plain: output.dll.
 add_library(rv SHARED
     src/rv/main.cpp
-    src/rv/unreal.hpp
-    src/rv/signatures.hpp)
+    src/rv/resolve.hpp
+    src/rv/signatures.hpp
+    src/rv/unreal.hpp)
 target_compile_options(rv PRIVATE /wd4369 /wd4309)
 set_target_properties(rv PROPERTIES
     OUTPUT_NAME "output"

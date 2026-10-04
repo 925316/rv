@@ -4,8 +4,9 @@
 #include <cstdarg>
 #include <cstring>
 
-#include "unreal.hpp"
+#include "resolve.hpp"
 #include "signatures.hpp"
+#include "unreal.hpp"
 
 // user32 is not in cl.exe's default libs.
 #pragma comment(lib, "user32.lib")
@@ -116,9 +117,9 @@ namespace
 	{
 		const uint8_t* image_base = (const uint8_t*)GetModuleHandleW(nullptr);
 		int found = 0;
-	constexpr int total = (int)(sizeof(signatures::TABLE) / sizeof(signatures::TABLE[0]));
+		constexpr int total = (int)(sizeof(signatures::TABLE) / sizeof(signatures::TABLE[0]));
 
-	for (const signatures::known_signature& sig : signatures::TABLE)
+		for (const signatures::known_signature& sig : signatures::TABLE)
 		{
 			signatures::pattern p;
 			if (!signatures::parse(sig.m_text, p))
@@ -545,6 +546,8 @@ namespace
 	}
 }
 
+namespace rv
+{
 DWORD main_thread(HMODULE module)
 {
 	init_crash_log(module);   // crash filter first, before any console exists
@@ -557,6 +560,7 @@ DWORD main_thread(HMODULE module)
 
 	debug_line("[RideFlight] waiting for game window ... (build " __DATE__ " " __TIME__ ")");
 
+	resolve_globals(debug_line);
 	verify_signatures();
 
 	bool installed = false;
@@ -588,13 +592,14 @@ DWORD main_thread(HMODULE module)
 
 	return 0;
 }
+} // namespace rv
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
 {
 	switch (reason)
 	{
 	case DLL_PROCESS_ATTACH:
-		CreateThread(0, 0, (LPTHREAD_START_ROUTINE)main_thread, module, 0, 0);
+		CreateThread(0, 0, (LPTHREAD_START_ROUTINE)rv::main_thread, module, 0, 0);
 		break;
 	}
 

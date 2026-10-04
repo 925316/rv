@@ -205,4 +205,81 @@ namespace signatures
 			return nullptr;
 		return find_in_image(p);
 	}
+
+	inline constexpr const char* APPEND_STRING_PATTERN = "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 80 3D ?? ?? ?? ?? 00 48 8B F2 8B 19 48 8B F9 74 09 4C 8D 05 ?? ?? ?? ??";
+
+	// Mapped base of the main module image.
+	inline const uint8_t* module_base()
+	{
+		return (const uint8_t*)GetModuleHandleW(nullptr);
+	}
+
+	// SizeOfImage from the PE headers; 0 when parsing fails.
+	inline size_t module_size(const uint8_t* base)
+	{
+		if (!base)
+			return 0;
+		const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
+		if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+			return 0;
+		const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+		if (nt->Signature != IMAGE_NT_SIGNATURE)
+			return 0;
+		return nt->OptionalHeader.SizeOfImage;
+	}
+
+	// Visits every RIP-relative memory operand in the executable sections:
+	// the 2-byte encoding form `opcode modrm disp32` with modrm mod=00 r/m=101
+	// (optionally behind a REX-byte). target is the image-relative offset the
+	// disp32 resolves to, opcode the byte at the operand start.
+	using rip_ref_visitor = void (*)(void* ctx, uint32_t target_rva, uint8_t opcode);
+
+	inline uint64_t enumerate_rip_refs(rip_ref_visitor visit, void* ctx)
+	{
+		const uint8_t* base = module_base();
+		if (!base || !visit)
+			return 0;
+
+		const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
+		if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+			return 0;
+		const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+		if (nt->Signature != IMAGE_NT_SIGNATURE)
+			return 0;
+		const size_t img_size = nt->OptionalHeader.SizeOfImage;
+
+		uint64_t hits = 0;
+		const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+		for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+		{
+			if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE))
+				continue;
+
+			const uint32_t va  = sec[i].VirtualAddress;
+			size_t         len = sec[i].Misc.VirtualSize;
+			if ((size_t)va + len > img_size)
+				len = img_size - va;
+
+			for (size_t off = 0; off < len; ++off)
+			{
+				size_t op = off;
+				if ((base[va + off] & 0xF0) == 0x40)
+					++op;
+				if (va + op + 6 > va + len)
+					continue;
+				if ((base[va + op + 1] & 0xC7) != 0x05)
+					continue;
+
+				int32_t disp;
+				memcpy(&disp, base + va + op + 2, 4);
+				int64_t target = (int64_t)va + (int64_t)op + 6 + disp;
+				if (target < 0 || (uint64_t)target >= (uint64_t)img_size)
+					continue;
+
+				visit(ctx, (uint32_t)target, base[va + op]);
+				++hits;
+			}
+		}
+		return hits;
+	}
 }

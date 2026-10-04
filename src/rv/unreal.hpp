@@ -15,11 +15,18 @@
 
 namespace unreal
 {
-	// Global RVAs (5.6.0-20702 rel-1.3)
+	// Global RVAs (5.6.0-20702 rel-1.3): compile-time fallbacks. At startup
+	// resolve.hpp's rv::resolve_globals() overwrites the mutable g_* counterparts;
+	// all accessors below read the g_* copies so a game update no longer means
+	// a rebuild.
 	inline constexpr uintptr_t G_OBJECTS_RVA     = 0x0A50E640;
 	inline constexpr uintptr_t G_WORLD_RVA       = 0x0A272A50;
 	inline constexpr uintptr_t APPEND_STRING_RVA = 0x01256FE0;
 	inline constexpr int       PROCESS_EVENT_IDX = 0x4C;
+
+	inline uintptr_t g_objects_rva       = G_OBJECTS_RVA;
+	inline uintptr_t g_world_rva         = G_WORLD_RVA;
+	inline uintptr_t g_append_string_rva = APPEND_STRING_RVA;
 
 	inline void* image_base()
 	{
@@ -123,7 +130,7 @@ namespace unreal
 	inline TUObjectArray* g_objects()
 	{
 		return reinterpret_cast<TUObjectArray*>(
-			static_cast<uint8_t*>(image_base()) + G_OBJECTS_RVA);
+			static_cast<uint8_t*>(image_base()) + g_objects_rva);
 	}
 
 	inline UObject* get_by_index(int32_t index)
@@ -149,8 +156,8 @@ namespace unreal
 	inline std::wstring name_to_string(const FName& name)
 	{
 		using Append_t = void (*)(const FName*, FString&);
-		static const Append_t append = reinterpret_cast<Append_t>(
-			static_cast<uint8_t*>(image_base()) + APPEND_STRING_RVA);
+		const Append_t append = reinterpret_cast<Append_t>(
+			static_cast<uint8_t*>(image_base()) + g_append_string_rva);
 
 		wchar_t buffer[1024] = {};
 		FString str{ buffer, 0, 1024 };
@@ -284,7 +291,7 @@ namespace unreal
 	inline UWorld* get_world()
 	{
 		return *reinterpret_cast<UWorld**>(
-			static_cast<uint8_t*>(image_base()) + G_WORLD_RVA);
+			static_cast<uint8_t*>(image_base()) + g_world_rva);
 	}
 
 	// ProcessEvent wrappers: par layouts match the dump's structs (sizes
