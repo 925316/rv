@@ -7,24 +7,12 @@
 #include "signatures.hpp"
 #include "unreal.hpp"
 
-/*
- * Startup validation of the three pinned fallback RVAs. The fallbacks in
- * unreal.hpp are the truth; this only checks they still match the live
- * image so a game update becomes a one-line log instead of a silent
- * break. Any failure keeps the fallback and logs - no census, no
- * re-discovery, nothing slow on the startup path.
- * Every layout probed here comes from offsets.hpp - the same constants
- * unreal.hpp pins its structs with - so the validator can never disagree
- * with the code it validates.
- */
-
+// Startup resolution: signature first, pinned fallback second.
+// A decoded target is adopted only after it passes validation.
 namespace rv
 {
 	namespace detail
 	{
-		// Memory-safety primitives live in unreal.hpp next to everything else
-		// that dereferences engine memory; re-exported so the walks below read
-		// as plain calls.
 		using unreal::read_ptr;
 		using unreal::readable;
 
@@ -33,10 +21,6 @@ namespace rv
 			return p > 0x10000000 && (p & 7) == 0 && p < 0x00007FFF00000000;
 		}
 
-		// TUObjectArray field consistency at a field-shifted candidate.
-		// memcpy instead of a reinterpret_cast load: candidate offsets are
-		// arbitrary byte positions in the image, so the fields are not
-		// guaranteed to be aligned for a typed dereference.
 		inline bool valid_obj_array(const uint8_t* img, uint32_t b, uint32_t img_size)
 		{
 			if ((uint64_t)b + offsets::OBJARRAY_SIZE > img_size)
@@ -57,7 +41,6 @@ namespace rv
 				&& num_c > 0 && num_c <= max_c && num_e <= (int64_t)num_c * chunk_cap;
 		}
 
-		// First chunk pointer of the array's chunk table must be plausible.
 		inline bool objects_chunk_ok(const uint8_t* img, uint32_t b, uint32_t img_size)
 		{
 			if ((uint64_t)b + 8 > img_size)
@@ -69,8 +52,12 @@ namespace rv
 			return plausible_ptr(c0);
 		}
 
-		// Walk UWorld -> PersistentLevel/GameInstance -> LocalPlayers -> PC.
-		// strict is set only when the whole chain reaches a plausible controller.
+		inline bool valid_objects_at(const uint8_t* img, uint32_t rva, uint32_t img_size)
+		{
+			return valid_obj_array(img, rva, img_size) &&
+				objects_chunk_ok(img, rva, img_size);
+		}
+
 		inline void world_chain(int64_t world, const uint8_t* base, uint32_t img_size, bool& strict)
 		{
 			strict = false;
@@ -88,7 +75,7 @@ namespace rv
 			if (!plausible_ptr(level) || !plausible_ptr(gi))
 				return;
 
-			// TArray layout: { Data +0x0, Num +0x8, Max +0xC }.
+			// TArray: { Data +0x0, Num +0x8, Max +0xC }.
 			int64_t data = 0;
 			int32_t num = 0, max = 0;
 			if (!read_ptr((const uint8_t*)gi + offsets::GAMEINSTANCE_LOCAL_PLAYERS_DATA, data) ||
@@ -109,12 +96,30 @@ namespace rv
 				return;
 			strict = plausible_ptr(pc);
 		}
+
+		// validated = live world; not_ready = null/incomplete chain (early
+		// inject, tick re-acquires); mismatch = garbage slot, RVA moved.
+		enum class world_state { kValidated, kNotReady, kMismatch };
+
+		inline world_state check_world_at(const uint8_t* img, uint32_t rva, uint32_t img_size)
+		{
+			if ((uint64_t)rva + 8 > img_size)
+				return world_state::kMismatch;
+			int64_t slot = 0;
+			if (!read_ptr(img + rva, slot))
+				return world_state::kMismatch;
+			if (slot == 0)
+				return world_state::kNotReady;
+			if (!plausible_ptr(slot))
+				return world_state::kMismatch;
+			bool strict = false;
+			world_chain(slot, img, img_size, strict);
+			return strict ? world_state::kValidated : world_state::kNotReady;
+		}
 	} // namespace detail
 
-	// Fallbacks stay as-is; log mirrors the debug_line tag.
 	inline void resolve_globals()
 	{
-		// Pinned values are the truth - re-assert in case anything wrote g_*.
 		unreal::g_objects_rva = unreal::G_OBJECTS_RVA;
 		unreal::g_world_rva = unreal::G_WORLD_RVA;
 		unreal::g_append_string_rva = unreal::APPEND_STRING_RVA;
@@ -122,72 +127,90 @@ namespace rv
 		const uint8_t* img = signatures::module_base();
 		if (!img)
 		{
-			log::debug("[sig] resolve: no module image, keeping build constants");
+			log::debug("[sig] no image, fallback");
 			return;
 		}
 		const uint32_t img_size = (uint32_t)signatures::module_size(img);
 		if (!img_size)
 		{
-			log::debug("[sig] resolve: bad PE headers, keeping build constants");
+			log::debug("[sig] bad headers, fallback");
 			return;
 		}
 
-		const bool objs_ok =
-			detail::valid_obj_array(img, unreal::G_OBJECTS_RVA, img_size) &&
-			detail::objects_chunk_ok(img, unreal::G_OBJECTS_RVA, img_size);
+		int via_sig = 0;
 
-		// Three states, because "no live world yet" and "offsets drifted"
-		// look identical from a failed chain walk. A null slot or an
-		// incomplete chain on a plausible world is normal on an early
-		// inject - the tick re-acquires the world every frame. Only a
-		// non-null garbage slot means the RVA itself moved.
-		enum class world_state { kValidated, kNotReady, kMismatch };
-		auto check_world = [&]() -> world_state
+		// GObjects.
 		{
-			if ((uint64_t)unreal::G_WORLD_RVA + 8 > img_size)
-				return world_state::kMismatch;
-			int64_t slot = 0;
-			if (!detail::read_ptr(img + unreal::G_WORLD_RVA, slot))
-				return world_state::kMismatch;
-			if (slot == 0)
-				return world_state::kNotReady;
-			if (!detail::plausible_ptr(slot))
-				return world_state::kMismatch;
-			bool strict = false;
-			detail::world_chain(slot, img, img_size, strict);
-			return strict ? world_state::kValidated : world_state::kNotReady;
-		};
-		const world_state world = check_world();
+			uint32_t sig_rva = 0;
+			if (signatures::find_global_ref(signatures::GOBJECTS_REF_PATTERN,
+				signatures::GOBJECTS_REF_DISP, signatures::GOBJECTS_REF_LEN,
+				img_size, sig_rva) &&
+				detail::valid_objects_at(img, sig_rva, img_size))
+			{
+				unreal::g_objects_rva = sig_rva;
+				++via_sig;
+			}
+			else
+				unreal::g_objects_rva = unreal::G_OBJECTS_RVA;
+			const bool ok = detail::valid_objects_at(img, (uint32_t)unreal::g_objects_rva, img_size);
+			log::debug("[sig] GObjects 0x%X %s%s", (uint32_t)unreal::g_objects_rva,
+				unreal::g_objects_rva != unreal::G_OBJECTS_RVA ? "sig" : "fallback",
+				ok ? "" : " BAD");
+		}
 
-		signatures::pattern ap;
-		int                 hits = 0;
-		const bool append_ok =
-			signatures::parse(signatures::APPEND_STRING_PATTERN, ap) &&
-			signatures::find_in_image(ap, &hits) && hits == 1;
+		// GWorld.
+		detail::world_state world = detail::world_state::kNotReady;
+		{
+			uint32_t sig_rva = 0;
+			const bool sig_hit = signatures::find_global_ref(signatures::GWORLD_REF_PATTERN,
+				signatures::GWORLD_REF_DISP, signatures::GWORLD_REF_LEN,
+				img_size, sig_rva);
+			detail::world_state sig_state = detail::world_state::kMismatch;
+			if (sig_hit)
+				sig_state = detail::check_world_at(img, sig_rva, img_size);
+			if (sig_hit && sig_state != detail::world_state::kMismatch)
+			{
+				unreal::g_world_rva = sig_rva;
+				world = sig_state;
+				++via_sig;
+			}
+			else
+			{
+				unreal::g_world_rva = unreal::G_WORLD_RVA;
+				world = detail::check_world_at(img, (uint32_t)unreal::g_world_rva, img_size);
+			}
+			const char* src = unreal::g_world_rva != unreal::G_WORLD_RVA ? "sig" : "fallback";
+			const char* st = world == detail::world_state::kValidated ? "" :
+				world == detail::world_state::kNotReady ? " pending" : " BAD";
+			log::debug("[sig] GWorld 0x%X %s%s", (uint32_t)unreal::g_world_rva, src, st);
+		}
 
-		log::debug("[sig] GObjects -> rva 0x%X (fallback%s)",
-			(uint32_t)unreal::G_OBJECTS_RVA, objs_ok ? ", validated" : " - VALIDATION FAILED, game update?");
-		if (world == world_state::kValidated)
-			log::debug("[sig] GWorld -> rva 0x%X (fallback, validated)",
-				(uint32_t)unreal::G_WORLD_RVA);
-		else if (world == world_state::kNotReady)
-			log::debug("[sig] GWorld -> rva 0x%X (fallback, world not ready yet - tick will re-acquire)",
-				(uint32_t)unreal::G_WORLD_RVA);
-		else
-			log::debug("[sig] GWorld -> rva 0x%X (fallback - VALIDATION FAILED, game update?)",
-				(uint32_t)unreal::G_WORLD_RVA);
-		if (append_ok)
-			log::debug("[sig] AppendString -> rva 0x%X (validated, unique hit)",
-				(uint32_t)unreal::APPEND_STRING_RVA);
-		else
-			log::debug("[sig] AppendString pattern: %d hits - VALIDATION FAILED, game update?", hits);
+		// AppendString: unique hit wins.
+		bool append_ok = false;
+		{
+			signatures::pattern ap;
+			int                 hits = 0;
+			const uint8_t*      hit = nullptr;
+			if (signatures::parse(signatures::APPEND_STRING_PATTERN, ap))
+				hit = signatures::find_in_image(ap, &hits);
+			if (hit && hits == 1)
+			{
+				unreal::g_append_string_rva = (uintptr_t)(hit - img);
+				append_ok = true;
+				++via_sig;
+			}
+			else
+				unreal::g_append_string_rva = unreal::APPEND_STRING_RVA;
+			log::debug("[sig] AppendString 0x%X %s%s", (uint32_t)unreal::g_append_string_rva,
+				unreal::g_append_string_rva != unreal::APPEND_STRING_RVA ? "sig" : "fallback",
+				append_ok || unreal::g_append_string_rva == unreal::APPEND_STRING_RVA ? "" : " BAD");
+		}
 
-		const bool world_bad = (world == world_state::kMismatch);
-		if (!objs_ok || world_bad || !append_ok)
-			log::debug("[sig] fix the RVA in src/rv/unreal.hpp, keeping fallbacks");
-		else if (world == world_state::kNotReady)
-			log::debug("[sig] 2/3 globals validated, GWorld pending a live world");
+		const bool objs_ok = detail::valid_objects_at(img, (uint32_t)unreal::g_objects_rva, img_size);
+		if (!objs_ok || world == detail::world_state::kMismatch || !append_ok)
+			log::debug("[sig] BAD: fix signatures.hpp + unreal.hpp (%d sig)", via_sig);
 		else
-			log::debug("[sig] 3/3 globals validated");
+			log::debug("[sig] %s (%d sig)", world == detail::world_state::kNotReady ? "2/3 pending world" : "3/3",
+				via_sig);
 	}
 }

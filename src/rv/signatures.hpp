@@ -267,4 +267,42 @@ namespace signatures
 	}
 
 	inline constexpr const char* APPEND_STRING_PATTERN = "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 80 3D ? ? ? ? ? 48 8B F2 ? ? 48 8B F9";
+
+	inline constexpr const char* GOBJECTS_REF_PATTERN = nullptr;
+	inline constexpr size_t GOBJECTS_REF_DISP = 3;   // disp32 offset in the match
+	inline constexpr size_t GOBJECTS_REF_LEN = 7;    // full instruction length
+
+	inline constexpr const char* GWORLD_REF_PATTERN = nullptr;
+	inline constexpr size_t GWORLD_REF_DISP = 3;
+	inline constexpr size_t GWORLD_REF_LEN = 7;
+
+	inline uint32_t rip_target(const uint8_t* hit, const uint8_t* base,
+		uint32_t img_size, size_t disp_off, size_t instr_len)
+	{
+		if (!hit || !base || disp_off + 4 > instr_len)
+			return 0;
+		int32_t disp = 0;
+		memcpy(&disp, hit + disp_off, sizeof(disp));
+		const int64_t target = (int64_t)(hit - base) + (int64_t)instr_len + disp;
+		if (target < 0 || (uint64_t)target >= img_size)
+			return 0;
+		return (uint32_t)target;
+	}
+
+	inline bool find_global_ref(const char* text, size_t disp_off, size_t instr_len,
+		uint32_t img_size, uint32_t& out_rva)
+	{
+		out_rva = 0;
+		if (!text)
+			return false;
+		pattern pat;
+		if (!parse(text, pat))
+			return false;
+		int hits = 0;
+		const uint8_t* hit = find_in_image(pat, &hits);
+		if (!hit || hits != 1)
+			return false;
+		out_rva = rip_target(hit, module_base(), img_size, disp_off, instr_len);
+		return out_rva != 0;
+	}
 }
