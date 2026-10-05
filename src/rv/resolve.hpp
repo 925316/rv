@@ -1,8 +1,6 @@
 #pragma once
 
 #include <cstring>
-#include <unordered_map>
-#include <vector>
 
 #include "log.hpp"
 #include "offsets.hpp"
@@ -10,33 +8,20 @@
 #include "unreal.hpp"
 
 /*
- * Startup resolution of the three fallback RVAs; any failure keeps the
- * fallback and logs. Every layout probed here comes from offsets.hpp - the
- * same constants unreal.hpp pins its structs with - so the validator can
- * never disagree with the code it validates.
+ * Startup validation of the three pinned fallback RVAs. The fallbacks in
+ * unreal.hpp are the truth; this only checks they still match the live
+ * image so a game update becomes a one-line log instead of a silent
+ * break. Any failure keeps the fallback and logs - no census, no
+ * re-discovery, nothing slow on the startup path.
+ * Every layout probed here comes from offsets.hpp - the same constants
+ * unreal.hpp pins its structs with - so the validator can never disagree
+ * with the code it validates.
  */
 
 namespace rv
 {
 	namespace detail
 	{
-		struct ref_stat
-		{
-			uint32_t m_refs = 0;
-			uint32_t m_writes = 0;
-		};
-
-		inline void rip_ref_accumulate(void* ctx, uint32_t target, uint8_t opcode)
-		{
-			auto* map = (std::unordered_map<uint32_t, ref_stat>*)ctx;
-			ref_stat& s = (*map)[target];
-			++s.m_refs;
-			// Memory-destination store opcodes => target slot is written.
-			if (opcode == 0x89 || opcode == 0x88 || opcode == 0xC7 ||
-				opcode == 0xC6 || opcode == 0x87)
-				++s.m_writes;
-		}
-
 		// Memory-safety primitives live in unreal.hpp next to everything else
 		// that dereferences engine memory; re-exported so the walks below read
 		// as plain calls.
@@ -126,9 +111,14 @@ namespace rv
 		}
 	} // namespace detail
 
-		// Results into unreal::g_*_rva; log mirrors the debug_line tag.
+	// Fallbacks stay as-is; log mirrors the debug_line tag.
 	inline void resolve_globals()
 	{
+		// Pinned values are the truth - re-assert in case anything wrote g_*.
+		unreal::g_objects_rva = unreal::G_OBJECTS_RVA;
+		unreal::g_world_rva = unreal::G_WORLD_RVA;
+		unreal::g_append_string_rva = unreal::APPEND_STRING_RVA;
+
 		const uint8_t* img = signatures::module_base();
 		if (!img)
 		{
@@ -142,206 +132,62 @@ namespace rv
 			return;
 		}
 
-		// Fast path: the pinned fallbacks still validate against the live
-		// image -> skip the census entirely. Only fall through to the full
-		// census when any of the three no longer matches (game updated,
-		// offsets drifted).
+		const bool objs_ok =
+			detail::valid_obj_array(img, unreal::G_OBJECTS_RVA, img_size) &&
+			detail::objects_chunk_ok(img, unreal::G_OBJECTS_RVA, img_size);
+
+		// Three states, because "no live world yet" and "offsets drifted"
+		// look identical from a failed chain walk. A null slot or an
+		// incomplete chain on a plausible world is normal on an early
+		// inject - the tick re-acquires the world every frame. Only a
+		// non-null garbage slot means the RVA itself moved.
+		enum class world_state { kValidated, kNotReady, kMismatch };
+		auto check_world = [&]() -> world_state
 		{
-			const bool objs_ok =
-				detail::valid_obj_array(img, unreal::G_OBJECTS_RVA, img_size) &&
-				detail::objects_chunk_ok(img, unreal::G_OBJECTS_RVA, img_size);
+			if ((uint64_t)unreal::G_WORLD_RVA + 8 > img_size)
+				return world_state::kMismatch;
+			int64_t slot = 0;
+			if (!detail::read_ptr(img + unreal::G_WORLD_RVA, slot))
+				return world_state::kMismatch;
+			if (slot == 0)
+				return world_state::kNotReady;
+			if (!detail::plausible_ptr(slot))
+				return world_state::kMismatch;
+			bool strict = false;
+			detail::world_chain(slot, img, img_size, strict);
+			return strict ? world_state::kValidated : world_state::kNotReady;
+		};
+		const world_state world = check_world();
 
-			bool world_ok = false;
-			if ((uint64_t)unreal::G_WORLD_RVA + 8 <= img_size)
-			{
-				int64_t slot = 0;
-				if (detail::read_ptr(img + unreal::G_WORLD_RVA, slot) &&
-					detail::plausible_ptr(slot))
-				{
-					bool strict = false;
-					detail::world_chain(slot, img, img_size, strict);
-					world_ok = strict;
-				}
-			}
+		signatures::pattern ap;
+		int                 hits = 0;
+		const bool append_ok =
+			signatures::parse(signatures::APPEND_STRING_PATTERN, ap) &&
+			signatures::find_in_image(ap, &hits) && hits == 1;
 
-			signatures::pattern ap;
-			int                 hits = 0;
-			const bool append_ok =
-				signatures::parse(signatures::APPEND_STRING_PATTERN, ap) &&
-				signatures::find_in_image(ap, &hits) && hits == 1;
+		log::debug("[sig] GObjects -> rva 0x%X (fallback%s)",
+			(uint32_t)unreal::G_OBJECTS_RVA, objs_ok ? ", validated" : " - VALIDATION FAILED, game update?");
+		if (world == world_state::kValidated)
+			log::debug("[sig] GWorld -> rva 0x%X (fallback, validated)",
+				(uint32_t)unreal::G_WORLD_RVA);
+		else if (world == world_state::kNotReady)
+			log::debug("[sig] GWorld -> rva 0x%X (fallback, world not ready yet - tick will re-acquire)",
+				(uint32_t)unreal::G_WORLD_RVA);
+		else
+			log::debug("[sig] GWorld -> rva 0x%X (fallback - VALIDATION FAILED, game update?)",
+				(uint32_t)unreal::G_WORLD_RVA);
+		if (append_ok)
+			log::debug("[sig] AppendString -> rva 0x%X (validated, unique hit)",
+				(uint32_t)unreal::APPEND_STRING_RVA);
+		else
+			log::debug("[sig] AppendString pattern: %d hits - VALIDATION FAILED, game update?", hits);
 
-			if (objs_ok && world_ok && append_ok)
-			{
-				log::debug("[sig] fallbacks validated, census skipped");
-				log::debug("[sig] AppendString -> rva 0x%X",
-					(uint32_t)unreal::APPEND_STRING_RVA);
-				log::debug("[sig] GObjects -> rva 0x%X (fallback)",
-					(uint32_t)unreal::G_OBJECTS_RVA);
-				log::debug("[sig] GWorld -> rva 0x%X (fallback)",
-					(uint32_t)unreal::G_WORLD_RVA);
-				return;
-			}
-			log::debug("[sig] fallback validation failed (objs=%d world=%d append=%d), running census",
-				objs_ok ? 1 : 0, world_ok ? 1 : 0, append_ok ? 1 : 0);
-		}
-
-		// 1) AppendString: adopted only when the full-prologue pattern hits
-		// exactly once; ambiguous or missing patterns keep the fallback.
-		{
-			signatures::pattern ap;
-			const uint8_t* hit = nullptr;
-			int                 hits = 0;
-			if (signatures::parse(signatures::APPEND_STRING_PATTERN, ap))
-				hit = signatures::find_in_image(ap, &hits);
-			if (hit && hits == 1)
-			{
-				unreal::g_append_string_rva = (uintptr_t)(hit - img);
-				log::debug("[sig] AppendString -> rva 0x%X", (uint32_t)unreal::g_append_string_rva);
-			}
-			else if (hits > 1)
-			{
-				log::debug("[sig] AppendString: %d hits (ambiguous) - keeping fallback 0x%X",
-					hits, (uint32_t)unreal::APPEND_STRING_RVA);
-			}
-			else
-			{
-				log::debug("[sig] AppendString: pattern not found - keeping fallback 0x%X",
-					(uint32_t)unreal::APPEND_STRING_RVA);
-			}
-		}
-
-		// 2) Census of RIP-relative references into writable data.
-		std::unordered_map<uint32_t, detail::ref_stat> census;
-		census.reserve(1 << 16);
-		const uint64_t hits = signatures::enumerate_rip_refs(detail::rip_ref_accumulate, &census);
-		log::debug("[sig] rip-ref census: %llu hits, %zu writable targets",
-			(unsigned long long)hits, census.size());
-
-		// 3) GObjects: TUObjectArray layout + chunk deref, rank by refs.
-		{
-			static constexpr uint32_t shifts[] = { 0, 8, 0x10, 0x14, 0x18, 0x1C };
-			std::unordered_map<uint32_t, uint32_t> go_pass;
-			for (const auto& kv : census)
-			{
-				const uint32_t t = kv.first;
-				for (uint32_t sh : shifts)
-				{
-					if (t < sh)
-						continue;
-					const uint32_t b = t - sh;
-					if (!detail::valid_obj_array(img, b, img_size))
-						continue;
-					go_pass[b] += kv.second.m_refs;
-					break;
-				}
-			}
-
-			uint32_t best_b = 0;
-			uint32_t best_refs = 0;
-			for (const auto& kv : go_pass)
-			{
-				if (!detail::objects_chunk_ok(img, kv.first, img_size))
-					continue;
-				if (kv.second > best_refs)
-				{
-					best_refs = kv.second;
-					best_b = kv.first;
-				}
-			}
-			if (best_refs > 0)
-			{
-				unreal::g_objects_rva = best_b;
-				log::debug("[sig] GObjects -> rva 0x%X (refs=%u)", best_b, best_refs);
-			}
-			else
-			{
-				log::debug("[sig] GObjects: no validated candidate - keeping fallback 0x%X",
-					(uint32_t)unreal::G_OBJECTS_RVA);
-			}
-		}
-
-		// 4) GWorld: strict chain, world-value group by summed refs,
-		// prefer write-through slots, then max refs.
-		{
-			struct cand
-			{
-				uint32_t m_rva;
-				uint32_t m_refs;
-				uint32_t m_writes;
-				uint64_t m_world;
-			};
-			std::vector<cand> strict;
-			for (const auto& kv : census)
-			{
-				const uint32_t t = kv.first;
-				if ((uint64_t)t + 8 > img_size)
-					continue;
-				int64_t slot = *reinterpret_cast<const int64_t*>(img + t);
-				if (!detail::plausible_ptr(slot))
-					continue;
-				bool is_strict = false;
-				detail::world_chain(slot, img, img_size, is_strict);
-				if (!is_strict)
-					continue;
-				strict.push_back({ t, kv.second.m_refs, kv.second.m_writes, (uint64_t)slot });
-			}
-
-			std::unordered_map<uint64_t, uint32_t> group_refs;
-			for (const auto& c : strict)
-				group_refs[c.m_world] += c.m_refs;
-
-			uint64_t best_world = 0;
-			uint32_t best_total = 0;
-			for (const auto& kv : group_refs)
-				if (kv.second > best_total)
-				{
-					best_total = kv.second;
-					best_world = kv.first;
-				}
-
-			uint32_t chosen = 0;
-			uint32_t chosen_refs = 0;
-			uint32_t chosen_writes = 0;
-			if (best_total > 0)
-			{
-				for (const auto& c : strict)
-				{
-					if (c.m_world != best_world || c.m_writes == 0)
-						continue;
-					if (!chosen || c.m_refs > chosen_refs)
-					{
-						chosen = c.m_rva;
-						chosen_refs = c.m_refs;
-						chosen_writes = c.m_writes;
-					}
-				}
-				if (!chosen)
-				{
-					for (const auto& c : strict)
-					{
-						if (c.m_world != best_world)
-							continue;
-						if (!chosen || c.m_refs > chosen_refs)
-						{
-							chosen = c.m_rva;
-							chosen_refs = c.m_refs;
-							chosen_writes = c.m_writes;
-						}
-					}
-				}
-			}
-
-			if (chosen)
-			{
-				unreal::g_world_rva = chosen;
-				log::debug("[sig] GWorld -> rva 0x%X (refs=%u writes=%u)",
-					chosen, chosen_refs, chosen_writes);
-			}
-			else
-			{
-				log::debug("[sig] GWorld: no strict candidate - keeping fallback 0x%X",
-					(uint32_t)unreal::G_WORLD_RVA);
-			}
-		}
+		const bool world_bad = (world == world_state::kMismatch);
+		if (!objs_ok || world_bad || !append_ok)
+			log::debug("[sig] fix the RVA in src/rv/unreal.hpp, keeping fallbacks");
+		else if (world == world_state::kNotReady)
+			log::debug("[sig] 2/3 globals validated, GWorld pending a live world");
+		else
+			log::debug("[sig] 3/3 globals validated");
 	}
 }
